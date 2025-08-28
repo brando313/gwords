@@ -1,253 +1,141 @@
-import React, { useEffect, useMemo, useState } from "react";
+/* index.css — same look/feel as cwords (TV-friendly, kid-friendly fonts) */
 
-/** Types & helpers */
-type Status = "correct" | "incorrect" | "skipped" | null;
-
-function simpleHash(s: string) {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return (h >>> 0).toString(36);
+:root {
+  --bg: #f8fafc;
+  --text: #1e293b;
+  --muted: #64748b;
+  --line: #e2e8f0;
+  --chip-green: #ecfdf5;
+  --chip-green-b: #86efac;
+  --chip-green-t: #065f46;
+  --chip-red: #fff1f2;
+  --chip-red-b: #fda4af;
+  --chip-red-t: #881337;
+  --chip-amber: #fffbeb;
+  --chip-amber-b: #fcd34d;
+  --chip-amber-t: #92400e;
+  --accent: #0ea5e9;
 }
 
-function parseWords(txt: string): string[] {
-  return txt
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-    .slice(0, 100); // preserve original case
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
 }
 
-async function loadTxt(): Promise<string[]> {
-  const res = await fetch("./gwords.txt", { cache: "no-store" });
-  if (!res.ok) throw new Error(`Failed to load gwords.txt (${res.status})`);
-  const txt = await res.text();
-  const words = parseWords(txt);
-  if (words.length === 0) throw new Error("gwords.txt has no words");
-  return words;
+/* Header */
+header { background: #fff; border-bottom: 1px solid var(--line); }
+.header-inner {
+  max-width: 120rem;
+  margin: 0 auto;
+  padding: 1rem 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.header-title { font-size: 2rem; font-weight: 700; }
+.header-actions { display: flex; gap: 8px; }
+
+.progress-wrap { width: 100%; background: #f1f5f9; height: 8px; }
+.progress-bar { height: 8px; background: var(--accent); transition: width .2s; }
+
+/* Main */
+main {
+  flex: 1;
+  max-width: 120rem;
+  width: 100%;
+  margin: 0 auto;
+  padding: 2rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
 }
 
-export default function App() {
-  const [words, setWords] = useState<string[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+/* Footer */
+footer { text-align: center; padding: 1rem; color: var(--muted); font-size: 0.9rem; }
 
-  const [statuses, setStatuses] = useState<Record<string, Status>>({});
-  const [index, setIndex] = useState(0);
-  const [view, setView] = useState<"trainer" | "summary">("trainer");
-  const [storeKey, setStoreKey] = useState<string>("");
-
-  // Load words on start
-  useEffect(() => {
-    (async () => {
-      try {
-        const w = await loadTxt();
-        setWords(w);
-        const key = "vocab_progress_" + simpleHash(w.join("\n"));
-        setStoreKey(key);
-
-        // restore progress if present
-        const raw = localStorage.getItem(key);
-        if (raw) {
-          try {
-            const parsed = JSON.parse(raw);
-            setIndex(Math.min(Math.max(Number(parsed.index) || 0, 0), w.length - 1));
-            const restored: Record<string, Status> = {};
-            w.forEach((word) => {
-              const s = parsed.statuses?.[word] ?? null;
-              restored[word] = s === "correct" || s === "incorrect" || s === "skipped" ? s : null;
-            });
-            setStatuses(restored);
-          } catch {
-            const init: Record<string, Status> = {};
-            w.forEach((word) => (init[word] = null));
-            setStatuses(init);
-            setIndex(0);
-          }
-        } else {
-          const init: Record<string, Status> = {};
-          w.forEach((word) => (init[word] = null));
-          setStatuses(init);
-          setIndex(0);
-        }
-      } catch (e: any) {
-        setError(e?.message || "Could not load gwords.txt");
-      }
-    })();
-  }, []);
-
-  // Persist progress
-  useEffect(() => {
-    if (!storeKey || !words) return;
-    try {
-      localStorage.setItem(storeKey, JSON.stringify({ statuses, index }));
-    } catch {}
-  }, [storeKey, statuses, index, words]);
-
-  // Grouping for summary
-  const groups = useMemo(() => {
-    const correct: string[] = [], incorrect: string[] = [], notAnswered: string[] = [];
-    (words ?? []).forEach((w) => {
-      const s = statuses[w];
-      if (s === "correct") correct.push(w);
-      else if (s === "incorrect") incorrect.push(w);
-      else notAnswered.push(w);
-    });
-    return { correct, incorrect, notAnswered };
-  }, [words, statuses]);
-
-  const answeredCount = groups.correct.length + groups.incorrect.length;
-  const total = words?.length ?? 0;
-  const progressPercent = total ? Math.round((answeredCount / total) * 100) : 0;
-  const allDone = total > 0 && groups.notAnswered.length === 0;
-
-  // Next index that is NOT "correct" (wrap once)
-  function findNextNonCorrect(from: number): number {
-    if (!words || words.length === 0) return -1;
-    const n = words.length;
-    for (let step = 1; step <= n; step++) {
-      const i = (from + step) % n;
-      if (statuses[words[i]] !== "correct") return i;
-    }
-    return -1;
-  }
-
-  function prev() { setIndex((i) => Math.max(i - 1, 0)); }
-  function next() {
-    const ni = findNextNonCorrect(index);
-    if (ni === -1) setView("summary");
-    else setIndex(ni);
-  }
-  function handleMark(mark: Exclude<Status, null>) {
-    if (!words) return;
-    const w = words[index];
-    setStatuses((prev) => ({ ...prev, [w]: mark }));
-    const ni = findNextNonCorrect(index);
-    if (ni === -1) setView("summary");
-    else setIndex(ni);
-  }
-  function resetAll() {
-    if (!words) return;
-    const cleared: Record<string, Status> = {};
-    words.forEach((w) => (cleared[w] = null));
-    setStatuses(cleared); setIndex(0); setView("trainer");
-  }
-  function jumpToWord(w: string) {
-    if (!words) return;
-    const i = words.indexOf(w);
-    if (i >= 0) { setIndex(i); setView("trainer"); }
-  }
-  async function reloadWords() {
-    setError(null);
-    try {
-      const w = await loadTxt();
-      setWords(w);
-      const key = "vocab_progress_" + simpleHash(w.join("\n"));
-      setStoreKey(key);
-      const raw = localStorage.getItem(key);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        setIndex(Math.min(Math.max(Number(parsed.index) || 0, 0), w.length - 1));
-        const restored: Record<string, Status> = {};
-        w.forEach((word) => {
-          const s = parsed.statuses?.[word] ?? null;
-          restored[word] = s === "correct" || s === "incorrect" || s === "skipped" ? s : null;
-        });
-        setStatuses(restored);
-      } else {
-        const init: Record<string, Status> = {};
-        w.forEach((word) => (init[word] = null));
-        setStatuses(init);
-        setIndex(0);
-      }
-    } catch (e: any) {
-      setError(e?.message || "Could not reload gwords.txt");
-    }
-  }
-
-  // Keyboard shortcuts (trainer view only)
-  useEffect(() => {
-    if (view !== "trainer") return;
-    const handler = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (k === "c") handleMark("correct");
-      if (k === "x") handleMark("incorrect");
-      if (k === "s") handleMark("skipped");
-      if (e.key === "ArrowRight" || e.key === " ") next();
-      if (e.key === "ArrowLeft") prev();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [view, index, statuses, words]);
-
-  return (
-    <div>
-      <header>
-        <div className="header-inner">
-          <div className="header-title">George&apos;s Words</div>
-          <div className="header-actions">
-            <button className="btn btn-small" onClick={() => setView(view === "trainer" ? "summary" : "trainer")}>
-              {view === "trainer" ? "Summary" : "Back to Practice"}
-            </button>
-            <button className="btn btn-small" onClick={resetAll}>Reset</button>
-            <button className="btn btn-small" onClick={reloadWords}>Reload gwords.txt</button>
-          </div>
-        </div>
-        <div className="progress-wrap">
-          <div className="progress-bar" style={{ width: `${progressPercent}%` }} />
-        </div>
-      </header>
-
-      {error && <main><div className="meta" style={{ color:"#b91c1c" }}>Error: {error}</div></main>}
-      {!error && !words && <main><div className="meta">Loading gwords.txt…</div></main>}
-
-      {words && !error && (
-        view === "trainer" ? (
-          <TrainerView
-            word={words[index]}
-            index={index}
-            total={words.length}
-            status={statuses[words[index]]}
-            onMark={handleMark}
-            onPrev={prev}
-            onNext={next}
-            allDone={allDone}
-          />
-        ) : (
-          <SummaryView
-            groups={{
-              correct: Object.keys(statuses).filter((w) => statuses[w] === "correct"),
-              incorrect: Object.keys(statuses).filter((w) => statuses[w] === "incorrect"),
-              notAnswered: words.filter((w) => statuses[w] !== "correct" && statuses[w] !== "incorrect"),
-            }}
-            jumpToWord={jumpToWord}
-          />
-        )
-      )}
-
-      <footer>
-        <p>
-          Tip: Edit <b>public/gwords.txt</b> (one word per line). Shortcuts — <b>C</b> ✓, <b>X</b> ✗, <b>S</b> skip, <b>Space/→</b> next.
-        </p>
-      </footer>
-    </div>
-  );
+/* Word card */
+.word-card {
+  width: 100%;
+  height: 60vh;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  box-shadow: 0 1px 6px rgba(0,0,0,.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.word-card span {
+  font-size: clamp(96px, 12vw, 240px);
+  font-weight: 800;
+  font-family: "Nunito", "Comic Sans MS", "Century Gothic", "Trebuchet MS", Arial, Verdana, sans-serif;
+  letter-spacing: -0.02em;
+  /* no text-transform — preserves case from txt file */
 }
 
-/** Views */
-function TrainerView({
-  word, index, total, status, onMark, onPrev, onNext, allDone,
-}: {
-  word: string; index: number; total: number; status: Status;
-  onMark: (mark: Exclude<Status, null>) => void; onPrev: () => void; onNext: () => void; allDone: boolean;
-}) {
-  return (
-    <main>
-      <div className="row" style={{ marginBottom: 16 }}>
-        <div className="meta">Word {index + 1} of {total}</div>
-        {status && (
-          <span
-            className={
-              "badge " +
-              (status === "correct" ? "badge-green" : status === "incorrect" ? "badge-red" : "badge-amber")
-            }
-          >
-            {status === "
+/* Rows / badges */
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.meta { color: #475569; font-size: 14px; }
+.badge { font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid; }
+.badge-green { border-color: var(--chip-green-b); color: var(--chip-green-t); background: var(--chip-green); }
+.badge-red   { border-color: var(--chip-red-b);   color: var(--chip-red-t);   background: var(--chip-red); }
+.badge-amber { border-color: var(--chip-amber-b); color: var(--chip-amber-t); background: var(--chip-amber); }
+
+/* Buttons */
+.btn {
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  font-weight: 600;
+  font-size: 16px;
+  cursor: pointer;
+}
+.btn:hover { background: #f1f5f9; }
+.btn-small { font-size: 14px; padding: 8px 12px; }
+.btn-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+.btn.btn-green { border-color: var(--chip-green-b); color: var(--chip-green-t); background: var(--chip-green); }
+.btn.btn-green:hover { background: #d1fae5; }
+.btn.btn-red { border-color: var(--chip-red-b); color: var(--chip-red-t); background: var(--chip-red); }
+.btn.btn-red:hover { background: #ffe4e6; }
+.btn.btn-amber { border-color: var(--chip-amber-b); color: var(--chip-amber-t); background: var(--chip-amber); }
+.btn.btn-amber:hover { background: #fef3c7; }
+
+/* Summary grid */
+.grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+@media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr 1fr; } }
+
+.card {
+  background: #fff; border: 1px solid var(--line); border-radius: 24px;
+  box-shadow: 0 1px 6px rgba(0,0,0,.04); overflow: hidden;
+}
+.card-head {
+  padding: 12px 16px; border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.card-title { margin: 0; font-weight: 600; }
+
+.list { list-style: none; margin: 0; padding: 0; max-height: 60vh; overflow: auto; }
+.list li button {
+  width: 100%; text-align: left; padding: 12px 16px; font-weight: 700;
+  font-family: "Nunito", "Comic Sans MS", "Century Gothic", "Trebuchet MS", Arial, Verdana, sans-serif;
+}
+.list li button:hover { background: #f8fafc; }
+
+/* Bigger touch targets on TVs */
+@media (min-width: 1400px) {
+  .header-title { font-size: 2.5rem; }
+  .btn { font-size: 22px; padding: 18px 26px; border-radius: 16px; }
+  .btn-small { font-size: 18px; padding: 12px 18px; }
+  .btn-row { gap: 20px; }
+  .meta { font-size: 18px; }
+}
