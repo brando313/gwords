@@ -1,13 +1,20 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
-type Status = "unanswered" | "correct" | "incorrect" | "skipped";
+/** Types & helpers */
+type Status = "correct" | "incorrect" | "skipped" | null;
+
+function simpleHash(s: string) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
 
 function parseWords(txt: string): string[] {
   return txt
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
-    .slice(0, 100); // keep original casing
+    .slice(0, 100); // preserve original case
 }
 
 async function loadTxt(): Promise<string[]> {
@@ -20,75 +27,294 @@ async function loadTxt(): Promise<string[]> {
 }
 
 export default function App() {
-  const [words, setWords] = useState<string[]>([]);
-  const [statuses, setStatuses] = useState<Record<number, Status>>({});
-  const [index, setIndex] = useState(0);
+  const [words, setWords] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
+  const [statuses, setStatuses] = useState<Record<string, Status>>({});
+  const [index, setIndex] = useState(0);
+  const [view, setView] = useState<"trainer" | "summary">("trainer");
+  const [storeKey, setStoreKey] = useState<string>("");
+
+  // Load words on start
   useEffect(() => {
-    loadTxt()
-      .then((w) => setWords(w))
-      .catch((e) => console.error(e));
+    (async () => {
+      try {
+        const w = await loadTxt();
+        setWords(w);
+        const key = "vocab_progress_" + simpleHash(w.join("\n"));
+        setStoreKey(key);
+
+        // restore progress if present
+        const raw = localStorage.getItem(key);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            setIndex(Math.min(Math.max(Number(parsed.index) || 0, 0), w.length - 1));
+            const restored: Record<string, Status> = {};
+            w.forEach((word) => {
+              const s = parsed.statuses?.[word] ?? null;
+              restored[word] = s === "correct" || s === "incorrect" || s === "skipped" ? s : null;
+            });
+            setStatuses(restored);
+          } catch {
+            const init: Record<string, Status> = {};
+            w.forEach((word) => (init[word] = null));
+            setStatuses(init);
+            setIndex(0);
+          }
+        } else {
+          const init: Record<string, Status> = {};
+          w.forEach((word) => (init[word] = null));
+          setStatuses(init);
+          setIndex(0);
+        }
+      } catch (e: any) {
+        setError(e?.message || "Could not load gwords.txt");
+      }
+    })();
   }, []);
 
-  const updateStatus = (status: Status) => {
-    setStatuses((prev) => ({ ...prev, [index]: status }));
-    if (status === "correct") {
-      goToNextUnfinished(index);
-    }
-  };
+  // Persist progress
+  useEffect(() => {
+    if (!storeKey || !words) return;
+    try {
+      localStorage.setItem(storeKey, JSON.stringify({ statuses, index }));
+    } catch {}
+  }, [storeKey, statuses, index, words]);
 
-  const goToNextUnfinished = (start: number) => {
-    for (let i = start + 1; i < words.length; i++) {
-      if (statuses[i] !== "correct") {
-        setIndex(i);
-        return;
+  // Grouping for summary
+  const groups = useMemo(() => {
+    const correct: string[] = [], incorrect: string[] = [], notAnswered: string[] = [];
+    (words ?? []).forEach((w) => {
+      const s = statuses[w];
+      if (s === "correct") correct.push(w);
+      else if (s === "incorrect") incorrect.push(w);
+      else notAnswered.push(w);
+    });
+    return { correct, incorrect, notAnswered };
+  }, [words, statuses]);
+
+  const answeredCount = groups.correct.length + groups.incorrect.length;
+  const total = words?.length ?? 0;
+  const progressPercent = total ? Math.round((answeredCount / total) * 100) : 0;
+  const allDone = total > 0 && groups.notAnswered.length === 0;
+
+  // Next index that is NOT "correct" (wrap once)
+  function findNextNonCorrect(from: number): number {
+    if (!words || words.length === 0) return -1;
+    const n = words.length;
+    for (let step = 1; step <= n; step++) {
+      const i = (from + step) % n;
+      if (statuses[words[i]] !== "correct") return i;
+    }
+    return -1;
+  }
+
+  function prev() { setIndex((i) => Math.max(i - 1, 0)); }
+  function next() {
+    const ni = findNextNonCorrect(index);
+    if (ni === -1) setView("summary");
+    else setIndex(ni);
+  }
+  function handleMark(mark: Exclude<Status, null>) {
+    if (!words) return;
+    const w = words[index];
+    setStatuses((prev) => ({ ...prev, [w]: mark }));
+    const ni = findNextNonCorrect(index);
+    if (ni === -1) setView("summary");
+    else setIndex(ni);
+  }
+  function resetAll() {
+    if (!words) return;
+    const cleared: Record<string, Status> = {};
+    words.forEach((w) => (cleared[w] = null));
+    setStatuses(cleared); setIndex(0); setView("trainer");
+  }
+  function jumpToWord(w: string) {
+    if (!words) return;
+    const i = words.indexOf(w);
+    if (i >= 0) { setIndex(i); setView("trainer"); }
+  }
+  async function reloadWords() {
+    setError(null);
+    try {
+      const w = await loadTxt();
+      setWords(w);
+      const key = "vocab_progress_" + simpleHash(w.join("\n"));
+      setStoreKey(key);
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setIndex(Math.min(Math.max(Number(parsed.index) || 0, 0), w.length - 1));
+        const restored: Record<string, Status> = {};
+        w.forEach((word) => {
+          const s = parsed.statuses?.[word] ?? null;
+          restored[word] = s === "correct" || s === "incorrect" || s === "skipped" ? s : null;
+        });
+        setStatuses(restored);
+      } else {
+        const init: Record<string, Status> = {};
+        w.forEach((word) => (init[word] = null));
+        setStatuses(init);
+        setIndex(0);
       }
+    } catch (e: any) {
+      setError(e?.message || "Could not reload gwords.txt");
     }
-    for (let i = 0; i <= start; i++) {
-      if (statuses[i] !== "correct") {
-        setIndex(i);
-        return;
-      }
-    }
-  };
+  }
 
-  const goPrev = () => setIndex((i) => (i > 0 ? i - 1 : words.length - 1));
-  const goNext = () => goToNextUnfinished(index);
-
-  if (words.length === 0) return <div>Loading words…</div>;
+  // Keyboard shortcuts (trainer view only)
+  useEffect(() => {
+    if (view !== "trainer") return;
+    const handler = (e: KeyboardEvent) => {
+      const k = e.key.toLowerCase();
+      if (k === "c") handleMark("correct");
+      if (k === "x") handleMark("incorrect");
+      if (k === "s") handleMark("skipped");
+      if (e.key === "ArrowRight" || e.key === " ") next();
+      if (e.key === "ArrowLeft") prev();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [view, index, statuses, words]);
 
   return (
-    <div className="app">
-      <div className="header">
-        <div className="header-title">George&apos;s Words</div>
-        <div className="header-actions">
-          <button onClick={() => setIndex(0)}>Summary</button>
-          <button onClick={() => { setStatuses({}); setIndex(0); }}>Reset</button>
+    <div>
+      <header>
+        <div className="header-inner">
+          <div className="header-title">George&apos;s Words</div>
+          <div className="header-actions">
+            <button className="btn btn-small" onClick={() => setView(view === "trainer" ? "summary" : "trainer")}>
+              {view === "trainer" ? "Summary" : "Back to Practice"}
+            </button>
+            <button className="btn btn-small" onClick={resetAll}>Reset</button>
+            <button className="btn btn-small" onClick={reloadWords}>Reload gwords.txt</button>
+          </div>
         </div>
-      </div>
+        <div className="progress-wrap">
+          <div className="progress-bar" style={{ width: `${progressPercent}%` }} />
+        </div>
+      </header>
 
-      <div className="word-info">
-        Word {index + 1} of {words.length}
+      {error && <main><div className="meta" style={{ color:"#b91c1c" }}>Error: {error}</div></main>}
+      {!error && !words && <main><div className="meta">Loading gwords.txt…</div></main>}
+
+      {words && !error && (
+        view === "trainer" ? (
+          <TrainerView
+            word={words[index]}
+            index={index}
+            total={words.length}
+            status={statuses[words[index]]}
+            onMark={handleMark}
+            onPrev={prev}
+            onNext={next}
+            allDone={allDone}
+          />
+        ) : (
+          <SummaryView
+            groups={{
+              correct: Object.keys(statuses).filter((w) => statuses[w] === "correct"),
+              incorrect: Object.keys(statuses).filter((w) => statuses[w] === "incorrect"),
+              notAnswered: words.filter((w) => statuses[w] !== "correct" && statuses[w] !== "incorrect"),
+            }}
+            jumpToWord={jumpToWord}
+          />
+        )
+      )}
+
+      <footer>
+        <p>
+          Tip: Edit <b>public/gwords.txt</b> (one word per line). Shortcuts — <b>C</b> ✓, <b>X</b> ✗, <b>S</b> skip, <b>Space/→</b> next.
+        </p>
+      </footer>
+    </div>
+  );
+}
+
+/** Views */
+function TrainerView({
+  word, index, total, status, onMark, onPrev, onNext, allDone,
+}: {
+  word: string; index: number; total: number; status: Status;
+  onMark: (mark: Exclude<Status, null>) => void; onPrev: () => void; onNext: () => void; allDone: boolean;
+}) {
+  return (
+    <main>
+      <div className="row" style={{ marginBottom: 16 }}>
+        <div className="meta">Word {index + 1} of {total}</div>
+        {status && (
+          <span
+            className={
+              "badge " +
+              (status === "correct" ? "badge-green" : status === "incorrect" ? "badge-red" : "badge-amber")
+            }
+          >
+            {status === "correct" ? "✓ correct" : status === "incorrect" ? "✗ incorrect" : "skipped"}
+          </span>
+        )}
       </div>
 
       <div className="word-card">
-        <span>{words[index]}</span>
+        <span>{word}</span>
       </div>
 
-      <div className="controls">
-        <button className="correct" onClick={() => updateStatus("correct")}>✓ Correct</button>
-        <button className="incorrect" onClick={() => updateStatus("incorrect")}>✗ Incorrect</button>
-        <button className="skip" onClick={() => updateStatus("skipped")}>Skip</button>
+      <div className="btn-row">
+        <button onClick={() => onMark("correct")} className="btn btn-green">✓ Correct</button>
+        <button onClick={() => onMark("incorrect")} className="btn btn-red">✗ Incorrect</button>
+        <button onClick={() => onMark("skipped")} className="btn btn-amber">Skip</button>
       </div>
 
-      <div className="nav">
-        <button onClick={goPrev}>← Prev</button>
-        <button onClick={goNext}>Next →</button>
+      <div className="row">
+        <button onClick={onPrev} className="btn btn-small">← Prev</button>
+        {!allDone ? (
+          <button onClick={onNext} className="btn btn-small">Next →</button>
+        ) : (
+          <button className="btn btn-small" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
+            All words reviewed — open Summary ▲
+          </button>
+        )}
       </div>
+    </main>
+  );
+}
 
-      <div className="footer">
-        Tip: Edit <b>public/gwords.txt</b> to update the word list.
+function SummaryView({
+  groups, jumpToWord,
+}: {
+  groups: { correct: string[]; incorrect: string[]; notAnswered: string[] };
+  jumpToWord: (w: string) => void;
+}) {
+  return (
+    <main>
+      <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 16 }}>Summary</h2>
+      <div className="grid">
+        <SummaryColumn title="Correct" tone="green" words={groups.correct} onSelect={jumpToWord} />
+        <SummaryColumn title="Incorrect" tone="red" words={groups.incorrect} onSelect={jumpToWord} />
+        <SummaryColumn title="Not Answered" tone="amber" words={groups.notAnswered} onSelect={jumpToWord} />
       </div>
-    </div>
+    </main>
+  );
+}
+
+function SummaryColumn({
+  title, tone, words, onSelect,
+}: {
+  title: string; tone: "green" | "red" | "amber"; words: string[]; onSelect: (w: string) => void;
+}) {
+  const pill = tone === "green" ? "badge badge-green" : tone === "red" ? "badge badge-red" : "badge badge-amber";
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h3 className="card-title">{title}</h3>
+        <span className={pill}>{words.length}</span>
+      </div>
+      <ul className="list">
+        {words.length === 0 && <li><div style={{ padding: 16, color: "#64748b", fontSize: 14 }}>None</div></li>}
+        {words.map((w) => (
+          <li key={w}><button onClick={() => onSelect(w)}>{w}</button></li>
+        ))}
+      </ul>
+    </section>
   );
 }
