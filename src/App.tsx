@@ -1,237 +1,94 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 
-// --- The 25 D/E-level words ---
-const WORDS = [
-  "knight","write","catch","phone","gnaw",
-  "dream","bread","train","coach","green",
-  "pie","thief","coin","toy",
-  "start","storm","bird","fern","turn",
-  "running","played","fearless","bigger","paper","music",
-] as const;
+type Status = "unanswered" | "correct" | "incorrect" | "skipped";
 
-type Status = "correct" | "incorrect" | "skipped" | null;
-type StoreShape = { statuses: Record<string, Status>; index: number; };
-const STORAGE_KEY = "vocab_trainer_progress_v1";
-
-function loadStore(): StoreShape | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    const statuses: Record<string, Status> = {};
-    WORDS.forEach((w) => {
-      const s = parsed.statuses?.[w] ?? null;
-      statuses[w] = s === "correct" || s === "incorrect" || s === "skipped" ? s : null;
-    });
-    const index = Math.min(Math.max(Number(parsed.index) || 0, 0), WORDS.length - 1);
-    return { statuses, index };
-  } catch { return null; }
+function parseWords(txt: string): string[] {
+  return txt
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .slice(0, 100); // keep original casing
 }
 
-function saveStore(data: StoreShape) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch {}
+async function loadTxt(): Promise<string[]> {
+  const res = await fetch("./gwords.txt", { cache: "no-store" });
+  if (!res.ok) throw new Error(`Failed to load gwords.txt (${res.status})`);
+  const txt = await res.text();
+  const words = parseWords(txt);
+  if (words.length === 0) throw new Error("gwords.txt has no words");
+  return words;
 }
 
 export default function App() {
-  const [statuses, setStatuses] = useState<Record<string, Status>>(() => {
-    const loaded = loadStore();
-    if (loaded) return loaded.statuses;
-    const base: Record<string, Status> = {}; WORDS.forEach((w) => base[w] = null); return base;
-  });
-  const [index, setIndex] = useState<number>(() => loadStore()?.index ?? 0);
-  const [view, setView] = useState<"trainer" | "summary">("trainer");
+  const [words, setWords] = useState<string[]>([]);
+  const [statuses, setStatuses] = useState<Record<number, Status>>({});
+  const [index, setIndex] = useState(0);
 
-  const groups = useMemo(() => {
-    const correct: string[] = [], incorrect: string[] = [], notAnswered: string[] = [];
-    WORDS.forEach((w) => {
-      const s = statuses[w];
-      if (s === "correct") correct.push(w);
-      else if (s === "incorrect") incorrect.push(w);
-      else notAnswered.push(w); // includes null + skipped
-    });
-    return { correct, incorrect, notAnswered };
-  }, [statuses]);
-
-  const answeredCount = groups.correct.length + groups.incorrect.length;
-  const progressPercent = Math.round((answeredCount / WORDS.length) * 100);
-  const allDone = groups.notAnswered.length === 0;
-
-  useEffect(() => { saveStore({ statuses, index }); }, [statuses, index]);
-
-  // Keyboard shortcuts
   useEffect(() => {
-    if (view !== "trainer") return;
-    const handler = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (k === "c") handleMark("correct");
-      if (k === "x") handleMark("incorrect");
-      if (k === "s") handleMark("skipped");
-      if (e.key === "ArrowRight" || e.key === " ") next();
-      if (e.key === "ArrowLeft") prev();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [view, index, statuses]);
+    loadTxt()
+      .then((w) => setWords(w))
+      .catch((e) => console.error(e));
+  }, []);
 
-  function nextIndex(from = index) {
-    if (from < WORDS.length - 1) return from + 1;
-    const remaining = WORDS.findIndex((w) => statuses[w] === null || statuses[w] === "skipped");
-    return remaining === -1 ? from : remaining;
-  }
-  function prev() { setIndex((i) => (i > 0 ? i - 1 : 0)); }
-  function next() {
-    const ni = nextIndex(index);
-    if (ni === index) setView("summary"); else setIndex(ni);
-  }
-  function handleMark(mark: Exclude<Status, null>) {
-    const word = WORDS[index];
-    setStatuses((prev) => ({ ...prev, [word]: mark }));
-    const ni = nextIndex(index);
-    if (ni === index) setView("summary"); else setIndex(ni);
-  }
-  function resetAll() {
-    const cleared: Record<string, Status> = {};
-    WORDS.forEach((w) => (cleared[w] = null));
-    setStatuses(cleared); setIndex(0); setView("trainer");
-  }
-  function jumpToWord(w: string) {
-    const i = WORDS.indexOf(w as any);
-    if (i >= 0) { setIndex(i); setView("trainer"); }
-  }
+  const updateStatus = (status: Status) => {
+    setStatuses((prev) => ({ ...prev, [index]: status }));
+    if (status === "correct") {
+      goToNextUnfinished(index);
+    }
+  };
+
+  const goToNextUnfinished = (start: number) => {
+    for (let i = start + 1; i < words.length; i++) {
+      if (statuses[i] !== "correct") {
+        setIndex(i);
+        return;
+      }
+    }
+    for (let i = 0; i <= start; i++) {
+      if (statuses[i] !== "correct") {
+        setIndex(i);
+        return;
+      }
+    }
+  };
+
+  const goPrev = () => setIndex((i) => (i > 0 ? i - 1 : words.length - 1));
+  const goNext = () => goToNextUnfinished(index);
+
+  if (words.length === 0) return <div>Loading words…</div>;
 
   return (
-    <div>
-      <header>
-        <div className="header-inner">
-          <div className="header-title">George's Words</div>
-          <div className="header-actions">
-            <button className="btn btn-small" onClick={() => setView(view === "trainer" ? "summary" : "trainer")}>
-              {view === "trainer" ? "Summary" : "Back to Practice"}
-            </button>
-            <button className="btn btn-small" onClick={resetAll} title="Clear progress">Reset</button>
-          </div>
+    <div className="app">
+      <div className="header">
+        <div className="header-title">George&apos;s Words</div>
+        <div className="header-actions">
+          <button onClick={() => setIndex(0)}>Summary</button>
+          <button onClick={() => { setStatuses({}); setIndex(0); }}>Reset</button>
         </div>
-        <div className="progress-wrap">
-          <div className="progress-bar" style={{ width: `${progressPercent}%` }} />
-        </div>
-      </header>
+      </div>
 
-      {view === "trainer" ? (
-        <TrainerView
-          word={WORDS[index]}
-          index={index}
-          total={WORDS.length}
-          status={statuses[WORDS[index]]}
-          onMark={handleMark}
-          onPrev={prev}
-          onNext={next}
-          allDone={allDone}
-        />
-      ) : (
-        <SummaryView groups={groups} jumpToWord={jumpToWord} />
-      )}
-
-      <footer>
-        <p>
-          Tip: Use keyboard shortcuts — <b>C</b> for ✓, <b>X</b> for ✗, <b>S</b> to skip,
-          <b> Space/→</b> next.
-        </p>
-      </footer>
-    </div>
-  );
-}
-
-function TrainerView({
-  word, index, total, status, onMark, onPrev, onNext, allDone,
-}: {
-  word: string; index: number; total: number; status: Status;
-  onMark: (mark: Exclude<Status, null>) => void; onPrev: () => void; onNext: () => void; allDone: boolean;
-}) {
-  return (
-    <main>
-      <div className="row" style={{ marginBottom: 16 }}>
-        <div className="meta">Word {index + 1} of {total}</div>
-        {status && (
-          <span
-            className={
-              "badge " +
-              (status === "correct" ? "badge-green" : status === "incorrect" ? "badge-red" : "badge-amber")
-            }
-            aria-live="polite"
-          >
-            {status === "correct" ? "Marked ✓ correct" : status === "incorrect" ? "Marked ✗ incorrect" : "Marked skip"}
-          </span>
-        )}
+      <div className="word-info">
+        Word {index + 1} of {words.length}
       </div>
 
       <div className="word-card">
-        <span>{word}</span>
+        <span>{words[index]}</span>
       </div>
 
-      <div style={{ height: 12 }} />
-
-      <div className="btn-row">
-        <button onClick={() => onMark("correct")} className="btn btn-green">✓ Correct</button>
-        <button onClick={() => onMark("incorrect")} className="btn btn-red">✗ Incorrect</button>
-        <button onClick={() => onMark("skipped")} className="btn btn-amber">Skip</button>
+      <div className="controls">
+        <button className="correct" onClick={() => updateStatus("correct")}>✓ Correct</button>
+        <button className="incorrect" onClick={() => updateStatus("incorrect")}>✗ Incorrect</button>
+        <button className="skip" onClick={() => updateStatus("skipped")}>Skip</button>
       </div>
 
-      <div style={{ height: 12 }} />
-
-      <div className="row">
-        <button onClick={onPrev} className="btn btn-small">← Prev</button>
-        {!allDone ? (
-          <button onClick={onNext} className="btn btn-small">Next →</button>
-        ) : (
-          <button onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} className="btn btn-small">
-            All words reviewed — open Summary ▲
-          </button>
-        )}
+      <div className="nav">
+        <button onClick={goPrev}>← Prev</button>
+        <button onClick={goNext}>Next →</button>
       </div>
-    </main>
-  );
-}
 
-function SummaryView({
-  groups, jumpToWord,
-}: {
-  groups: { correct: string[]; incorrect: string[]; notAnswered: string[] };
-  jumpToWord: (w: string) => void;
-}) {
-  return (
-    <main>
-      <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 16 }}>Summary</h2>
-      <div className="grid">
-        <SummaryColumn title="Correct" tone="green" words={groups.correct} onSelect={jumpToWord} />
-        <SummaryColumn title="Incorrect" tone="red" words={groups.incorrect} onSelect={jumpToWord} />
-        <SummaryColumn title="Not Answered" tone="amber" words={groups.notAnswered} onSelect={jumpToWord} />
+      <div className="footer">
+        Tip: Edit <b>public/gwords.txt</b> to update the word list.
       </div>
-    </main>
-  );
-}
-
-function SummaryColumn({
-  title, tone, words, onSelect,
-}: {
-  title: string; tone: "green" | "red" | "amber"; words: string[]; onSelect: (w: string) => void;
-}) {
-  const pill = tone === "green" ? "badge badge-green" : tone === "red" ? "badge badge-red" : "badge badge-amber";
-  return (
-    <section className="card">
-      <div className="card-head">
-        <h3 className="card-title">{title}</h3>
-        <span className={pill}>{words.length}</span>
-      </div>
-      <ul className="list">
-        {words.length === 0 && <li><div style={{ padding: 16, color: "#64748b", fontSize: 14 }}>None</div></li>}
-        {words.map((w) => (
-          <li key={w}>
-            <button onClick={() => onSelect(w)} title="Open word to practice">
-              {w}
-            </button>
-          </li>
-        ))}
-      </ul>
-    </section>
+    </div>
   );
 }
